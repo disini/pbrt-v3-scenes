@@ -1,0 +1,78 @@
+diff --git a/src/core/api.cpp b/src/core/api.cpp
+index e0c4b4a..b275b85 100644
+--- a/src/core/api.cpp
++++ b/src/core/api.cpp
+@@ -234,6 +234,9 @@ static std::vector<uint32_t> pushedActiveTransformBits;
+ static TransformCache transformCache;
+ int catIndentCount = 0;
+ 
++static bool renderEachMaterial = getenv("PBRT_MTL_HACK");
++static std::map<std::string, std::shared_ptr<Material>>::iterator namedMaterialsIter;
++
+ // API Forward Declarations
+ std::vector<std::shared_ptr<Shape>> MakeShapes(const std::string &name,
+                                                const Transform *ObjectToWorld,
+@@ -1346,6 +1349,14 @@ void pbrtWorldEnd() {
+     // Create scene and render
+     if (PbrtOptions.cat || PbrtOptions.toPly) {
+         printf("%*sWorldEnd\n", catIndentCount, "");
++    } else if (renderEachMaterial) {
++      for (namedMaterialsIter = graphicsState.namedMaterials.begin();
++           namedMaterialsIter != graphicsState.namedMaterials.end(); ++namedMaterialsIter) {
++        std::unique_ptr<Integrator> integrator(renderOptions->MakeIntegrator());
++        std::unique_ptr<Scene> scene(renderOptions->MakeScene());
++        if (scene && integrator) integrator->Render(*scene);
++      }
++      // TODO? render stuff with no material bound?
+     } else {
+         std::unique_ptr<Integrator> integrator(renderOptions->MakeIntegrator());
+         std::unique_ptr<Scene> scene(renderOptions->MakeScene());
+@@ -1371,13 +1382,24 @@ void pbrtWorldEnd() {
+ }
+ 
+ Scene *RenderOptions::MakeScene() {
+-    std::shared_ptr<Primitive> accelerator =
+-        MakeAccelerator(AcceleratorName, primitives, AcceleratorParams);
++    std::shared_ptr<Primitive> accelerator;
++    if (renderEachMaterial) {
++        std::vector<std::shared_ptr<Primitive>> filteredPrims;
++        std::copy_if(primitives.begin(), primitives.end(), std::back_inserter(filteredPrims),
++                     [](const std::shared_ptr<Primitive> &p) -> bool {
++                       return p->GetMaterial() == namedMaterialsIter->second.get();
++                     });
++        accelerator = MakeAccelerator(AcceleratorName, filteredPrims, AcceleratorParams);
++    } else {
++        accelerator = MakeAccelerator(AcceleratorName, primitives, AcceleratorParams);
++    }
+     if (!accelerator) accelerator = std::make_shared<BVHAccel>(primitives);
+     Scene *scene = new Scene(accelerator, lights);
+-    // Erase primitives and lights from _RenderOptions_
+-    primitives.erase(primitives.begin(), primitives.end());
+-    lights.erase(lights.begin(), lights.end());
++    if (!renderEachMaterial) {
++      // Erase primitives and lights from _RenderOptions_
++      primitives.erase(primitives.begin(), primitives.end());
++      lights.erase(lights.begin(), lights.end());
++    }
+     return scene;
+ }
+ 
+@@ -1427,7 +1449,17 @@ Integrator *RenderOptions::MakeIntegrator() const {
+ 
+ Camera *RenderOptions::MakeCamera() const {
+     std::unique_ptr<Filter> filter = MakeFilter(FilterName, FilterParams);
+-    Film *film = MakeFilm(FilmName, FilmParams, std::move(filter));
++    Film *film = nullptr;
++    if (renderEachMaterial) {
++      ParamSet fp = FilmParams;
++      std::unique_ptr<std::string[]> fns(new std::string[1]);
++      fns[0] = namedMaterialsIter->first + ".exr";
++      fp.AddString("filename", std::move(fns), 1);
++      std::unique_ptr<Filter> box(new BoxFilter({0.5f, 0.5f}));
++      film = MakeFilm(FilmName, fp, std::move(box));
++    } else
++      film = MakeFilm(FilmName, FilmParams, std::move(filter));
++
+     if (!film) {
+         Error("Unable to create film.");
+         return nullptr;
